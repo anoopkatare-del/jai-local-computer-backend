@@ -7,6 +7,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     JAI_BROWSER_CHANNEL=chrome \
     JAI_WORKSPACE=/data
 
+LABEL org.opencontainers.image.source="https://github.com/anoopkatare-del/jai-local-computer-backend"
+
 WORKDIR /app
 
 COPY requirements.txt ./
