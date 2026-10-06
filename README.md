@@ -1,32 +1,36 @@
-# J AI Local Computer (prototype)
+# J AI Real Browser Computer
 
-Yeh project attached J AI interface ke saath **local browser-computer backend** jodta hai. Backend Playwright Chromium chalata hai, public pages kholta/padhta hai, screenshot deta hai aur files ko alag workspace mein download karta hai. J AI ko computer tools sirf tab milte hain jab user **Workspace → Live Computer** se explicit task chalata hai.
+This project connects the attached J AI interface to a browser computer running in the backend. The Railway image installs **official Google Chrome Stable** and launches it headless; the app mirrors current Chrome screenshots into both **Workspace → Live Computer** and the app's **Mini Computer** display. The preview refreshes about every 1.8 seconds while connected (it is a live screenshot preview, not an exported video recording).
 
-## Search integration
+## Search
 
-Live Computer aur J AI web search **Tavily API** ko local backend se call karte hain—**Google Custom Search API nahi**. `secrets.env` mein di hui pehli key try hoti hai; request fail ho to doosri key automatically try hoti hai. Keys browser HTML, network response, aur AI prompt ko nahin bheji jaati. Search result ke baad Chromium se public pages khol/padh sakta hai. Google ka direct page alag se khola ja sakta hai, lekin CAPTCHA/anti-bot challenge aa sakta hai.
+- **Google Chrome is tried first**: the backend opens the real Google results page and extracts public result titles, links and snippets.
+- If Google returns a CAPTCHA, blocks extraction, or has no readable results, the combined search uses the user's two configured **Tavily API keys**, in order, with the second key as automatic fallback.
+- Both Tavily keys stay server-side in protected Railway variables or the ignored local `secrets.env`; they are not embedded in the app HTML or sent to the AI model.
+- The explicit **Search Google in Chrome** button shows the real Google page and does not silently switch providers. If Google blocks extraction, the combined-search button and J AI web search can use Tavily fallback.
 
-## Kya kaam karta hai
+## What it can do
 
-- Existing J AI search API se web results aur answer lena.
-- Public website navigate/read karna; current page ka screenshot aur text J AI ko dena.
-- AI ko ek request ke liye maximum 5 browser steps dena: `web_search` (app ka existing search API), `open_page`, `read_page`, `download`; page `click`/`fill` ke har attempt se pehle exact target dikhakar user se confirmation.
-- Download ko `workspace/downloads/` mein rakhna; UI se download ko user ke device par save karna.
-- Browser profile ko `workspace/.browser-profile/` mein local rakhna. Visible mode mein user apne account mein khud login kar sakta hai; agent ko credentials ya OTP nahi dene chahiye.
+- Open real Google Chrome pages, perform Google searches, read public page text and mirror browser screenshots in the app.
+- Let J AI request a bounded sequence of up to five browser actions for a task. Public downloads are saved in the backend workspace and never run automatically.
+- Show an approval preview before a page click or text entry; the user must approve the exact target. Form submission, payment, login secrets, account/security changes and other consequential actions remain manual.
+- Keep Chrome's browser profile and downloaded files in the configured workspace. A Railway persistent volume mounted at `/data` preserves them across deploys/restarts. Each download is limited to 25 MB.
 
-## Jo yeh nahin karta
+## Limits and safety
 
-Yeh complete desktop OS / Google ka official product nahin hai. Browser **Playwright Chromium** par chalta hai—Chrome-compatible engine, official Google Chrome distribution nahin. Headless mode mein websites khulengi; `JAI_HEADLESS=0` karne par local desktop par visible Chromium khulta hai. CAPTCHA, login challenges, blocked sites aur anti-bot controls ko bypass nahin karta.
+This is a **browser computer**, not a complete remote desktop or Google product. On Railway, Google Chrome runs headless; the live screen is shown inside J AI rather than as a separate desktop window. CAPTCHA, login challenges, blocked pages, anti-bot controls and websites that prohibit automation are not bypassed. Screenshots refresh periodically; this package does not create a downloadable MP4/WebM recording.
 
-Arbitrary shell command execution, downloaded file execution, passwords/payment/OTP entry, purchase, deletion, account-security change, official form submission ya doosre high-impact action nahin hain. Clicks/fills ke liye user prompt aata hai; potentially consequential buttons backend rokta hai. Downloads 25 MB per file tak seemit hain, aur kabhi auto-run nahin hote. Yeh controls perfect security boundary ka daawa nahin hain—personal credentials ya public-facing hosting ke liye production security review alag se zaroori hai.
+Arbitrary shell execution, downloaded-file execution, credentials/OTP/payment entry, purchases, official submissions, destructive changes and account-security changes are not offered. Downloads are checked against public destinations and saved only to the backend workspace.
 
-## Install (Linux/macOS)
+## Local install (Linux/macOS)
 
-Python 3.10+ chahiye.
+Python 3.10+ is required. The default local setup uses Playwright's bundled Chromium. To use locally installed official Google Chrome, set `JAI_BROWSER_CHANNEL=chrome` and install Chrome on that machine.
 
 ```bash
 unzip JAI-Local-Computer.zip
 cd jai-real-computer
+cp secrets.env.example secrets.env
+# Edit secrets.env locally: use a long private JAI_COMPUTER_TOKEN and your Tavily keys.
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
@@ -34,21 +38,15 @@ python -m playwright install chromium
 python app.py
 ```
 
-Terminal mein pairing token print hoga. Apne browser mein `http://127.0.0.1:8765` kholo, **Workspace → Live Computer** jao, token paste karke **Connect** dabao. Token kisi ke saath share mat karo.
+Open the URL printed in the terminal, go to **Workspace → Live Computer**, paste the local pairing token and press **Connect**. Keep the token private. `secrets.env` is ignored by Git and excluded from the Docker build context.
 
-Headless mode default hai. Apne computer par **visible browser window** kholna ho to service ko environment variable ke saath chalao:
-
-```bash
-JAI_HEADLESS=0 python app.py
-```
-
-macOS shell syntax shell ke mutabik ho sakti hai. Server band karne ke liye terminal mein `Ctrl+C` dabao.
-
-## Install (Windows PowerShell)
+## Local install (Windows PowerShell)
 
 ```powershell
 Expand-Archive .\JAI-Local-Computer.zip .
 cd .\jai-real-computer
+Copy-Item .\secrets.env.example .\secrets.env
+# Edit secrets.env locally before starting.
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
@@ -56,26 +54,18 @@ python -m playwright install chromium
 python app.py
 ```
 
-Visible browser ke liye:
+The service is headless by default. On a local desktop only, `JAI_HEADLESS=0` opens the browser visibly. Railway remains headless and shows screenshots in the app.
 
-```powershell
-$env:JAI_HEADLESS="0"
-python app.py
-```
+## Railway deployment
 
-## AI aur backend connection
+The `Dockerfile` installs Google Chrome Stable and binds to Railway's injected `PORT`. Deploy this project to a Railway service, generate its HTTPS domain, then mount a persistent volume at `/data`. The image sets `JAI_WORKSPACE=/data` and `JAI_BROWSER_CHANNEL=chrome`.
 
-Yeh backend khud koi paid AI model key nahin maangta. Packaged J AI UI apni pehle-se configured model/provider setting use karta hai; us model ke liye internet/configuration zaroori hai. Tavily keys local-only `secrets.env` mein hoti hain; file ko private rakhein, GitHub/public hosting par upload ya kisi aur ko ZIP share na karein. `secrets.env` `.gitignore` mein hai.
+Set these **service variables** in Railway:
 
-Service jaanbujhkar `127.0.0.1` par bind hoti hai—public internet par nahin. Bundled J AI UI aur computer API ek hi localhost origin se serve hote hain; pairing token har server start par naya banta hai. `JAI_PORT` se port badal sakte ho; usi port par UI ko kholna hoga.
+- `JAI_COMPUTER_TOKEN` — a long random pairing token (the service intentionally does not print this value in Railway logs).
+- `JAI_TAVILY_API_KEY_1` and `JAI_TAVILY_API_KEY_2` — the two Tavily keys, used only by the backend as fallback.
+- `JAI_HEADLESS=1` and `JAI_WORKSPACE=/data` (already set by the Docker image, shown here for clarity).
 
-Isi computer par chal raha doosra local process `/api/search`, `/api/open`, `/api/agent/step`, `/api/files` routes use kar sakta hai, har protected request ke `X-JAI-Token` header mein terminal token bhejkar. **Remote cloud AI backend localhost service tak seedhe nahin pahunch sakta**—uske liye alag, authenticated secure gateway/relay banana aur security review karna hoga. Ise reverse proxy/VPS par seedhe public na karein.
+The bundled J AI HTML and API are served on the **same Railway origin**. Open that deployed URL, go to **Workspace → Live Computer**, enter the private `JAI_COMPUTER_TOKEN`, and connect. API routes require the token. Do not publish it or place it in browser HTML. If serving a separate UI domain, configure the exact origin in `JAI_ALLOWED_ORIGINS` and the host in `JAI_ALLOWED_HOSTS`; avoid wildcard origins.
 
-Downloads `workspace/downloads/` mein rehte hain; browser login profile `workspace/.browser-profile/` mein store hoti hai. Profile delete karne se browser ke saved sessions/logout ho jaayenge.
-
-
-## Railway hosting
-
-`Dockerfile` Railway par Chromium aur API ko ek hi service mein chalata hai. Bundled J AI UI bhi wahi serve hota hai, isliye uska `/api` computer backend se same-origin rehta hai. Railway mein `JAI_COMPUTER_TOKEN`, `JAI_TAVILY_API_KEY_1`, `JAI_TAVILY_API_KEY_2`, `JAI_HEADLESS=1`, aur `JAI_WORKSPACE=/data` server-side variables set karein; persistent volume ko `/data` par mount karein. `PORT` Railway khud deta hai. `secrets.env` local development ke liye hai aur Git/Docker context se ignore hoti hai.
-
-Public Railway domain kholkar **Workspace → Live Computer** mein private config ka pairing token paste karke Connect karein. API routes token-protected hain. Agar is UI ke bajay kisi doosre domain se connect karna ho, Railway variable `JAI_ALLOWED_ORIGINS` mein us exact origin (scheme ke saath) set karein; ise `*` na rakhein.
+`secrets.env.example` is a placeholder template only. If no persistent volume is attached, browser profile and downloaded files in `/data` may be lost when the container is replaced.

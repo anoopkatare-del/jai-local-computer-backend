@@ -57,8 +57,14 @@ TAVILY_KEYS = tuple(dict.fromkeys(
 TOKEN = os.environ.get("JAI_COMPUTER_TOKEN") or secrets.token_urlsafe(32)
 HEADLESS = os.environ.get("JAI_HEADLESS", "1").lower() not in {"0", "false", "no"}
 PORT = int(os.environ.get("PORT", os.environ.get("JAI_PORT", "8765")))
+BROWSER_CHANNEL = os.environ.get("JAI_BROWSER_CHANNEL", "").strip()
+RAILWAY_PUBLIC_DOMAIN = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").split(":", 1)[0].lower()
+ALLOWED_HOSTS = {"127.0.0.1", "localhost", "testserver"}
+ALLOWED_HOSTS.update(x.strip().lower().split(":", 1)[0] for x in os.environ.get("JAI_ALLOWED_HOSTS", "").split(",") if x.strip())
+if RAILWAY_PUBLIC_DOMAIN:
+    ALLOWED_HOSTS.add(RAILWAY_PUBLIC_DOMAIN)
 
-app = FastAPI(title="J AI Local Computer", version="1.0.0", docs_url=None, redoc_url=None)
+app = FastAPI(title="J AI Local Computer", version="2.0.0", docs_url=None, redoc_url=None)
 ALLOWED_ORIGINS = [x.strip().rstrip("/") for x in os.environ.get("JAI_ALLOWED_ORIGINS", "").split(",") if x.strip()]
 app.add_middleware(
     CORSMiddleware,
@@ -93,6 +99,7 @@ class Computer:
         self.page = None
         self.lock = asyncio.Lock()
         self.dns_cache: dict[str, tuple[float, bool, str]] = {}
+        self.browser_name = "Playwright Chromium"
 
     async def start(self) -> None:
         WORKSPACE.mkdir(parents=True, exist_ok=True)
@@ -100,17 +107,25 @@ class Computer:
         PROFILE.mkdir(parents=True, exist_ok=True)
         self.pw = await async_playwright().start()
         args = ["--no-sandbox", "--disable-dev-shm-usage"] if getattr(os, "geteuid", lambda: 1)() == 0 else []
+        options = {"headless": HEADLESS, "viewport": {"width": 1365, "height": 900}, "accept_downloads": True, "args": args}
         try:
-            self.context = await self.pw.chromium.launch_persistent_context(
-                str(PROFILE), headless=HEADLESS, viewport={"width": 1365, "height": 900},
-                accept_downloads=True, args=args,
-                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            )
+            if BROWSER_CHANNEL:
+                try:
+                    self.context = await self.pw.chromium.launch_persistent_context(str(PROFILE), channel=BROWSER_CHANNEL, **options)
+                    self.browser_name = "Google Chrome" if BROWSER_CHANNEL.lower() == "chrome" else "Playwright " + BROWSER_CHANNEL
+                except Exception:
+                    if BROWSER_CHANNEL.lower() != "chrome":
+                        raise
+                    self.context = await self.pw.chromium.launch_persistent_context(str(PROFILE), **options)
+                    self.browser_name = "Playwright Chromium (Chrome fallback)"
+            else:
+                self.context = await self.pw.chromium.launch_persistent_context(str(PROFILE), **options)
+                self.browser_name = "Playwright Chromium"
         except Exception as e:
             await self.pw.stop()
             self.pw = None
             raise RuntimeError(
-                "Chromium is not installed. Run: python -m playwright install chromium. " + str(e)[:500]
+                "Google Chrome/Chromium could not be started. Install Chrome or run: python -m playwright install chromium. " + str(e)[:500]
             ) from e
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         self.page.set_default_timeout(9000)
@@ -191,10 +206,15 @@ class Computer:
             except Exception:
                 pass
             results = await self.page.locator("a:has(h3)").evaluate_all("els => els.slice(0,8).map(a => ({title:(a.querySelector('h3')?.innerText||'').trim(),url:a.href,snippet:(a.parentElement?.parentElement?.innerText||'').trim().slice(0,700)})).filter(x=>x.title&&/^https?:/.test(x.url)&&!x.url.includes('google.com/search'))")
+            snapshot = await self._snapshot()
             if not results:
-                body = (await self.page.locator("body").inner_text())[:5000]
-                return {"ok": True, "query": query, "results": [], "notice": "Google returned no extractable results. It may require a CAPTCHA or have changed its page layout.", "page_text": body}
-            return {"ok": True, "query": query, "results": results, "url": self.page.url}
+                return {"ok": True, "provider": self.browser_name, "query": query, "results": [],
+                        "notice": "Google returned no extractable results. It may require a CAPTCHA or have changed its page layout.",
+                        "page_text": snapshot.get("text", ""), "title": snapshot.get("title", ""),
+                        "url": self.page.url, "screenshot": snapshot.get("screenshot")}
+            return {"ok": True, "provider": self.browser_name, "query": query, "results": results,
+                    "url": self.page.url, "title": snapshot.get("title", ""),
+                    "text": snapshot.get("text", ""), "screenshot": snapshot.get("screenshot")}
 
     async def open_page(self, url: str) -> dict:
         url = await self._public_url(url)
@@ -209,6 +229,17 @@ class Computer:
     async def read_page(self) -> dict:
         async with self.lock:
             return await self._snapshot()
+
+    async def live_screenshot(self) -> dict:
+        async with self.lock:
+            try:
+                image = await self.page.screenshot(type="jpeg", quality=62, full_page=False, timeout=7000)
+                return {"ok": True, "browser": self.browser_name, "url": self.page.url,
+                        "title": (await self.page.title())[:300],
+                        "screenshot": "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii")}
+            except Exception as e:
+                return {"ok": False, "browser": self.browser_name, "url": self.page.url,
+                        "error": str(e)[:350]}
 
     async def click(self, selector: str, approved: bool) -> dict:
         if not selector:
@@ -263,10 +294,13 @@ computer = Computer()
 async def startup() -> None:
     await computer.start()
     print("\nJ AI local computer is ready.")
-    print("Open: http://127.0.0.1:8765")
-    print("Pairing token (enter it in Mini Computer → Live Computer):")
-    print(TOKEN + "\n")
-    print("Browser mode:", "headed (visible)" if not HEADLESS else "headless")
+    print(f"Open: http://127.0.0.1:{PORT}")
+    if os.environ.get("RAILWAY_PROJECT_ID"):
+        print("Pairing token loaded from protected service variables; token value is intentionally not logged.")
+    else:
+        print("Pairing token (enter it in Workspace → Live Computer):")
+        print(TOKEN + "\n")
+    print("Browser:", computer.browser_name, "| mode:", "headed (visible)" if not HEADLESS else "headless with live in-app preview")
 
 
 @app.on_event("shutdown")
@@ -277,14 +311,15 @@ async def shutdown() -> None:
 @app.middleware("http")
 async def local_only(request: FastRequest, call_next):
     host = request.headers.get("host", "").split(":", 1)[0].strip("[]").lower()
-    if host not in {"127.0.0.1", "localhost"}:
-        return JSONResponse({"detail": "This local computer service only accepts localhost requests."}, status_code=403)
+    railway_host = host.endswith(".up.railway.app") and (not RAILWAY_PUBLIC_DOMAIN or host == RAILWAY_PUBLIC_DOMAIN)
+    if host not in ALLOWED_HOSTS and not railway_host:
+        return JSONResponse({"detail": "Host is not allowed for this J AI computer service."}, status_code=403)
     origin = request.headers.get("origin")
     if origin:
         try:
             op = urlsplit(origin)
             local_origin = op.hostname in {"127.0.0.1", "localhost"} and op.port in {None, PORT}
-            same_host = op.scheme in {"http", "https"} and op.hostname == request.url.hostname
+            same_host = op.scheme in {"http", "https"} and op.hostname == host
             configured_origin = origin.rstrip("/") in ALLOWED_ORIGINS or "*" in ALLOWED_ORIGINS
             if not (local_origin or same_host or configured_origin):
                 return JSONResponse({"detail": "Cross-origin requests are not allowed."}, status_code=403)
@@ -295,24 +330,31 @@ async def local_only(request: FastRequest, call_next):
 
 def require_token(x_jai_token: str | None) -> None:
     if not x_jai_token or not secrets.compare_digest(x_jai_token, TOKEN):
-        raise HTTPException(401, "Pair this app with the local computer using the token shown in the server terminal.")
+        raise HTTPException(401, "Pair the app with its computer using the private pairing token in Workspace → Live Computer.")
 
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "service": "J AI local computer", "browser": "Chromium", "headless": HEADLESS,
-            "connected": bool(computer.page), "downloads": "/api/files", "version": "1.0.0"}
+    return {"ok": True, "service": "J AI computer", "browser": computer.browser_name, "headless": HEADLESS,
+            "connected": bool(computer.page), "downloads": "/api/files", "version": "2.0.0"}
 
 
 @app.get("/api/state")
 async def state(x_jai_token: str | None = Header(default=None)):
     require_token(x_jai_token)
-    return {"ok": True, "url": computer.page.url, "title": await computer.page.title(), "headless": HEADLESS}
+    return {"ok": True, "url": computer.page.url, "title": await computer.page.title(),
+            "browser": computer.browser_name, "headless": HEADLESS}
+
+
+@app.get("/api/screenshot")
+async def screenshot(x_jai_token: str | None = Header(default=None)):
+    require_token(x_jai_token)
+    return await computer.live_screenshot()
 
 
 def tavily_search(query: str) -> dict:
     if not TAVILY_KEYS:
-        raise HTTPException(503, "Tavily API keys are not configured in local secrets.env.")
+        raise HTTPException(503, "Tavily API keys are not configured in the backend's protected environment.")
     failures: list[str] = []
     for index, key in enumerate(TAVILY_KEYS, start=1):
         request = Request(
@@ -347,10 +389,41 @@ def tavily_search(query: str) -> dict:
     raise HTTPException(502, "Tavily search failed with both configured keys (" + "; ".join(failures) + ").")
 
 
+@app.post("/api/google-search")
+async def google_search_endpoint(body: SearchBody, x_jai_token: str | None = Header(default=None)):
+    require_token(x_jai_token)
+    try:
+        return await computer.google_search(body.query.strip())
+    except Exception as e:
+        raise HTTPException(502, "Google Chrome search failed: " + str(e)[:350]) from e
+
+
 @app.post("/api/search")
 async def search(body: SearchBody, x_jai_token: str | None = Header(default=None)):
     require_token(x_jai_token)
-    return await asyncio.to_thread(tavily_search, body.query.strip())
+    google_result: dict = {}
+    try:
+        google_result = await computer.google_search(body.query.strip())
+        if google_result.get("results"):
+            return google_result
+    except Exception as e:
+        google_result = {"notice": "Google Chrome search could not complete: " + str(e)[:200]}
+    try:
+        fallback = await asyncio.to_thread(tavily_search, body.query.strip())
+    except HTTPException as e:
+        if google_result:
+            google_result["tavily_error"] = str(e.detail)
+            google_result.setdefault("notice", "Google could not provide extractable results and Tavily fallback failed.")
+            return google_result
+        raise
+    fallback["provider"] = "Tavily fallback after Google Chrome"
+    if google_result.get("screenshot"):
+        for key in ("screenshot", "url", "title", "page_text"):
+            if google_result.get(key):
+                fallback[key] = google_result[key]
+    if google_result.get("notice"):
+        fallback["google_notice"] = google_result["notice"]
+    return fallback
 
 
 @app.post("/api/open")
@@ -448,7 +521,11 @@ async def agent_step(body: StepBody, x_jai_token: str | None = Header(default=No
     require_token(x_jai_token)
     try:
         action = body.action.strip().lower()
-        if action in {"web_search", "google_search"}:
+        if action == "google_search":
+            if not body.query:
+                raise HTTPException(400, "Search query is required.")
+            return await computer.google_search(body.query.strip())
+        if action == "web_search":
             if not body.query:
                 raise HTTPException(400, "Search query is required.")
             return await asyncio.to_thread(tavily_search, body.query.strip())
@@ -469,7 +546,7 @@ async def agent_step(body: StepBody, x_jai_token: str | None = Header(default=No
             if body.text is None:
                 raise HTTPException(400, "Text to enter is required.")
             return await computer.fill(body.selector or "", body.text, body.approved)
-        raise HTTPException(400, "Supported actions: web_search, google_search (alias), open_page, read_page, download, click, fill.")
+        raise HTTPException(400, "Supported actions: web_search, google_search, open_page, read_page, download, click, fill.")
     except HTTPException:
         raise
     except Exception as e:
